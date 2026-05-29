@@ -196,7 +196,7 @@ struct ClipboardCardView: View {
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(sourceAccent)
 
-                Text(highlighted(item.rawText ?? ""))
+                Text(highlightedSnippet(item.rawText ?? ""))
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
                     .lineLimit(6)
                     .foregroundStyle(.primary)
@@ -224,7 +224,7 @@ struct ClipboardCardView: View {
                     linkThumbnail
                 }
 
-                Text(highlighted(item.rawText ?? ""))
+                Text(highlightedSnippet(item.rawText ?? ""))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
@@ -257,7 +257,7 @@ struct ClipboardCardView: View {
                     .lineLimit(2)
             }
         case .text:
-            Text(highlighted(item.rawText ?? ""))
+            Text(highlightedSnippet(item.rawText ?? ""))
                 .font(.system(size: 15, weight: .regular))
                 .lineLimit(7)
                 .foregroundStyle(.primary)
@@ -410,6 +410,42 @@ struct ClipboardCardView: View {
             searchStart = range.upperBound
         }
         return attributed
+    }
+
+    /// 长正文的「搜索摘要」：命中靠后(超出可见行)时，从命中前一点处开窗、前缀 "…"，
+    /// 把关键字上移到卡片可见区，保证每个命中项都能看到高亮；命中靠前则原样高亮。
+    private func highlightedSnippet(_ string: String) -> AttributedString {
+        guard !searchQuery.isEmpty else { return AttributedString(string) }
+        guard let match = string.range(of: searchQuery, options: .caseInsensitive) else {
+            // 本字段未命中（可能命中在别的字段），原样返回不开窗。
+            return AttributedString(string)
+        }
+
+        // 命中距开头的字符数：在 visibleBudget 内基本第一屏可见，原样高亮；超出才开窗上移。
+        let visibleBudget = 40
+        let contextBefore = 10
+        let lead = string.distance(from: string.startIndex, to: match.lowerBound)
+        let needsWindow = lead > visibleBudget
+
+        var start = string.startIndex
+        if needsWindow {
+            start = string.index(match.lowerBound, offsetBy: -contextBefore, limitedBy: string.startIndex)
+                ?? string.startIndex
+            // 跳过开窗处切到的空白/换行，让片段从实义字符起头
+            while start < match.lowerBound, string[start].isWhitespace {
+                start = string.index(after: start)
+            }
+        }
+
+        // 只取约一屏的窗口，避免对超长文本（几千字）构建巨大的 AttributedString。
+        let windowChars = needsWindow ? 320 : 600
+        let end = string.index(start, offsetBy: windowChars, limitedBy: string.endIndex) ?? string.endIndex
+        let windowed = highlighted(String(string[start..<end]))
+
+        guard needsWindow else { return windowed }
+        var ellipsis = AttributedString("…")
+        ellipsis.foregroundColor = .secondary
+        return ellipsis + windowed
     }
 
     private func relativeTime(from date: Date) -> String {
