@@ -50,7 +50,15 @@ struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
         scrollView.allowsMagnification = false
         scrollView.verticalScrollElasticity = .none
 
+        // 整条滚动链路都用图层支撑：滚动时只平移已缓存的图层位图，
+        // 而不是每帧重画 SwiftUI 内容（自定义 scrollWheel 已绕过系统的 responsive scrolling，
+        // 所以图层缓存是这里保证横向滚动不掉帧的关键）。
+        scrollView.wantsLayer = true
+        scrollView.contentView.wantsLayer = true
+
         let hostingView = NSHostingView(rootView: content)
+        hostingView.wantsLayer = true
+        hostingView.layerContentsRedrawPolicy = .onSetNeedsDisplay
         scrollView.documentView = hostingView
         scrollView.contentWidth = contentWidth()
         context.coordinator.hostingView = hostingView
