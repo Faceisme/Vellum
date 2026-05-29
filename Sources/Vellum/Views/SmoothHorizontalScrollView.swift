@@ -3,8 +3,12 @@ import SwiftUI
 
 /// 横向滚动容器：鼠标滚轮（纵向）也能横向滚动 + 平滑动画 + 键盘定位。
 struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
+    /// HStack 两侧的水平 padding（与 ClipboardPanelView.timeline 里保持一致）
+    private static var horizontalPadding: CGFloat { 26 }
+
     let selectedIndex: Int
     let scrollRequest: Int
+    let itemCount: Int
     let itemWidth: CGFloat
     let spacing: CGFloat
     let content: Content
@@ -12,18 +16,28 @@ struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
     init(
         selectedIndex: Int,
         scrollRequest: Int,
+        itemCount: Int,
         itemWidth: CGFloat,
         spacing: CGFloat,
         @ViewBuilder content: () -> Content
     ) {
         self.selectedIndex = selectedIndex
         self.scrollRequest = scrollRequest
+        self.itemCount = itemCount
         self.itemWidth = itemWidth
         self.spacing = spacing
         self.content = content()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
+
+    /// 按数量直接算内容总宽，避免每次更新都触发 fittingSize 整树布局测量
+    private func contentWidth() -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        return CGFloat(itemCount) * itemWidth
+            + CGFloat(itemCount - 1) * spacing
+            + Self.horizontalPadding * 2
+    }
 
     func makeNSView(context: Context) -> VellumSmoothScrollView {
         let scrollView = VellumSmoothScrollView()
@@ -37,23 +51,22 @@ struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
         scrollView.verticalScrollElasticity = .none
 
         let hostingView = NSHostingView(rootView: content)
-        hostingView.frame = NSRect(origin: .zero, size: hostingView.fittingSize)
         scrollView.documentView = hostingView
+        scrollView.contentWidth = contentWidth()
         context.coordinator.hostingView = hostingView
+        context.coordinator.lastItemCount = itemCount
         return scrollView
     }
 
     func updateNSView(_ scrollView: VellumSmoothScrollView, context: Context) {
         guard let hostingView = context.coordinator.hostingView else { return }
 
+        // rootView 必须重新赋值（卡片选中态/内容会变）；尺寸不在这里直接算，
+        // 改由 scrollView.layout() 统一处理——避免 updateNSView 在 clip view 尚无有效高度时
+        // （如时间线被空搜索结果换出后又换回）把内容定成错误尺寸且无法自愈，导致错位。
         hostingView.rootView = content
-        let fittingSize = hostingView.fittingSize
-        hostingView.frame = NSRect(
-            x: 0,
-            y: 0,
-            width: max(fittingSize.width, scrollView.contentView.bounds.width),
-            height: max(fittingSize.height, scrollView.contentView.bounds.height)
-        )
+        scrollView.contentWidth = contentWidth() // 内容宽变化 -> 触发重新 layout
+        context.coordinator.lastItemCount = itemCount
 
         if context.coordinator.lastScrollRequest != scrollRequest {
             context.coordinator.lastScrollRequest = scrollRequest
@@ -69,12 +82,48 @@ struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
     final class Coordinator {
         var hostingView: NSHostingView<Content>?
         var lastScrollRequest = 0
+        var lastItemCount = 0
     }
 }
 
 final class VellumSmoothScrollView: NSScrollView {
     private var targetX: CGFloat = 0
     private var isAnimatingWheel = false
+
+    /// 内容总宽（按卡片数量算），由 representable 设置；变化时重新布局
+    var contentWidth: CGFloat = 0 {
+        didSet { needsLayout = true }
+    }
+
+    override func layout() {
+        super.layout()
+        sizeDocumentViewAndClampScroll()
+    }
+
+    /// 文档视图高度始终跟随可视区高度（避免列表换入换出时尺寸残留错位），
+    /// 宽度取内容宽与可视宽的较大者；内容尺寸变化后把横向偏移钳回有效范围。
+    private func sizeDocumentViewAndClampScroll() {
+        guard let documentView else { return }
+
+        let viewportHeight = contentView.bounds.height
+        let viewportWidth = contentView.bounds.width
+        guard viewportHeight > 0, viewportWidth > 0 else { return }
+
+        let width = max(contentWidth, viewportWidth)
+        let newFrame = NSRect(x: 0, y: 0, width: width, height: viewportHeight)
+        if documentView.frame != newFrame {
+            documentView.frame = newFrame
+        }
+
+        let maxX = max(0, width - viewportWidth)
+        let currentX = contentView.bounds.origin.x
+        let clampedX = min(max(0, currentX), maxX)
+        if clampedX != currentX {
+            contentView.setBoundsOrigin(NSPoint(x: clampedX, y: 0))
+            targetX = clampedX
+            reflectScrolledClipView(contentView)
+        }
+    }
 
     override func scrollWheel(with event: NSEvent) {
         guard let documentView else {

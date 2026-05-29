@@ -35,8 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // 退出前强制落盘，避免丢失未保存的历史
-        clipboardMonitor.flushNow()
+        // 退出前强制落盘并等待写盘完成，避免丢失未保存的历史
+        clipboardMonitor.flushAndWait()
     }
 
     private func bindSettings() {

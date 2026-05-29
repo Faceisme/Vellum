@@ -12,6 +12,8 @@ struct ClipboardPanelView: View {
 
     @State private var isSearching = false
     @State private var searchText = ""
+    /// 实际驱动过滤的查询词，相对 searchText 做 150ms 防抖，避免每次按键都重算过滤 + 重建卡片时间线（打字掉帧）
+    @State private var debouncedQuery = ""
     @State private var searchFieldReady = false
     @State private var didWarmSearchField = false
     @State private var showFavoritesOnly = false
@@ -26,7 +28,7 @@ struct ClipboardPanelView: View {
             result = result.filter(\.isFavorite)
         }
 
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         if !query.isEmpty {
             result = result.filter { item in
                 [
@@ -48,9 +50,8 @@ struct ClipboardPanelView: View {
         return result
     }
 
-    /// 选中下标钳制在有效范围内
-    private var clampedSelection: Int {
-        let count = filteredItems.count
+    /// 选中下标钳制在有效范围内（按给定数量，避免重复计算 filteredItems）
+    private func clampedSelection(count: Int) -> Int {
         guard count > 0 else { return 0 }
         return min(max(0, selectedIndex), count - 1)
     }
@@ -61,7 +62,10 @@ struct ClipboardPanelView: View {
     }
 
     var body: some View {
-        ZStack {
+        // 一次 body 只算一次过滤结果与选中下标，避免在 clampedSelection/timeline/每张卡片里重复全量 filter
+        let items = filteredItems
+        let selection = clampedSelection(count: items.count)
+        return ZStack {
             // macOS 26 Liquid Glass — 保留通透感，同时提高底板不透明度。
             // 阴影改用原生 .shadow()（GPU 优化），不再用全屏 .blur 矩形（入场每帧重算高斯模糊会卡）。
             GlassEffectView(
@@ -91,12 +95,12 @@ struct ClipboardPanelView: View {
 
                 if monitor.items.isEmpty {
                     emptyState(title: "复制内容后会显示在这里")
-                } else if filteredItems.isEmpty {
+                } else if items.isEmpty {
                     emptyState(title: showFavoritesOnly
                                ? "还没有收藏的项目（右键卡片可收藏）"
                                : "没有找到匹配的剪贴板项目")
                 } else {
-                    timeline(items: filteredItems)
+                    timeline(items: items, selection: selection)
                 }
             }
         }
@@ -117,6 +121,16 @@ struct ClipboardPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: .vellumNavWarmSearch)) { _ in
             warmSearchField()
         }
+        .task(id: searchText) {
+            // 清空立即生效；输入时等 150ms 再过滤，打字过程不触发卡片重建
+            if searchText.isEmpty {
+                debouncedQuery = ""
+                return
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            debouncedQuery = searchText
+        }
     }
 
     // MARK: - 键盘选择/删除
@@ -124,25 +138,27 @@ struct ClipboardPanelView: View {
     private func moveSelection(_ delta: Int, requestScroll: Bool = false) {
         let count = filteredItems.count
         guard count > 0 else { return }
-        selectedIndex = min(max(0, clampedSelection + delta), count - 1)
+        selectedIndex = min(max(0, clampedSelection(count: count) + delta), count - 1)
         if requestScroll {
             keyboardScrollRequest += 1
         }
     }
 
     private func deleteSelected() {
-        guard !filteredItems.isEmpty else { return }
-        let target = filteredItems[clampedSelection]
+        let items = filteredItems
+        guard !items.isEmpty else { return }
+        let target = items[clampedSelection(count: items.count)]
         withAnimation(.easeOut(duration: 0.18)) {
             monitor.delete(target)
         }
         // 删除后选中项停在原位（即原来的下一项），并钳制范围
-        selectedIndex = min(selectedIndex, max(0, filteredItems.count - 1))
+        selectedIndex = min(selectedIndex, max(0, items.count - 2))
     }
 
     private func selectCurrent() {
-        guard !filteredItems.isEmpty else { return }
-        onSelect(filteredItems[clampedSelection])
+        let items = filteredItems
+        guard !items.isEmpty else { return }
+        onSelect(items[clampedSelection(count: items.count)])
     }
 
     private func expandSearch() {
@@ -310,6 +326,7 @@ struct ClipboardPanelView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.40) {
             if !isSearching {
                 searchText = ""
+                debouncedQuery = ""
             }
         }
     }
@@ -326,8 +343,10 @@ struct ClipboardPanelView: View {
         .frame(width: isSearching ? 392 : 34, height: isSearching ? 28 : 34, alignment: .leading)
         .clipShape(RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous))
         .overlay {
+            // 用 strokeBorder（描边画在形状内侧）而非 stroke（描边跨越边缘）；
+            // 否则聚焦蓝环的外半部分会被父容器 toolbarCluster 的 .clipped() 在左边缘切掉
             RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous)
-                .stroke(
+                .strokeBorder(
                     isSearching
                     ? (searchFieldFocused ? Color.blue.opacity(0.78) : .white.opacity(0.26))
                     : .clear,
@@ -413,10 +432,11 @@ struct ClipboardPanelView: View {
         .help("更多")
     }
 
-    private func timeline(items: [ClipboardItem]) -> some View {
+    private func timeline(items: [ClipboardItem], selection: Int) -> some View {
         SmoothHorizontalScrollView(
-            selectedIndex: clampedSelection,
+            selectedIndex: selection,
             scrollRequest: keyboardScrollRequest,
+            itemCount: items.count,
             itemWidth: 232,
             spacing: 18
         ) {
@@ -425,7 +445,7 @@ struct ClipboardPanelView: View {
                     ClipboardCardView(
                         item: item,
                         index: index + 1,
-                        isSelected: index == clampedSelection,
+                        isSelected: index == selection,
                         onSelect: { onSelect(item) },
                         onToggleFavorite: { monitor.toggleFavorite(item) },
                         onCopy: { monitor.restore(item) },

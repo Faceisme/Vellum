@@ -14,9 +14,9 @@ struct VisualEffectView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-        nsView.state = state
+        if nsView.material != material { nsView.material = material }
+        if nsView.blendingMode != blendingMode { nsView.blendingMode = blendingMode }
+        if nsView.state != state { nsView.state = state }
     }
 }
 
@@ -34,8 +34,9 @@ struct GlassEffectView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSGlassEffectView, context: Context) {
-        nsView.cornerRadius = cornerRadius
-        nsView.tintColor = tintColor
-        nsView.style = style
+        // 仅在实际变化时赋值，避免每次 body 重算（如 hover）都重设属性触发玻璃层重绘
+        if nsView.cornerRadius != cornerRadius { nsView.cornerRadius = cornerRadius }
+        if nsView.tintColor != tintColor { nsView.tintColor = tintColor }
+        if nsView.style != style { nsView.style = style }
     }
 }

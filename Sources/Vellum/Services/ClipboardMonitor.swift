@@ -7,8 +7,14 @@ final class ClipboardMonitor: ObservableObject {
     @Published private(set) var items: [ClipboardItem] = []
 
     private var timer: Timer?
+    private var pruneTimer: Timer?
     private var lastChangeCount = NSPasteboard.general.changeCount
     private let maxItems = 36
+
+    /// 收藏项数量上限：收藏豁免 maxItems 裁剪，必须单独设上限，否则内存/存储会无界增长
+    private let maxFavorites = 100
+    /// 富文本（RTF）单项上限：超过则降级为纯文本，避免 base64 膨胀 JSON 与内存
+    private let maxRTFBytes = 1 * 1024 * 1024
 
     private static let favoritesKey = "vellum.favorites"
     private var favoriteFingerprints: Set<String> =
@@ -23,13 +29,21 @@ final class ClipboardMonitor: ObservableObject {
         pruneExpired()
         captureCurrentPasteboard()
 
+        // 高频定时器只做剪贴板变化检测，尽量轻
         timer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.pollPasteboard()
-                self?.pruneExpired()
             }
         }
         timer?.tolerance = 0.2
+
+        // 过期清理改为低频（每 60s），不再跟随高频轮询空转
+        pruneTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.pruneExpired()
+            }
+        }
+        pruneTimer?.tolerance = 15
     }
 
     func clear() {
@@ -44,6 +58,17 @@ final class ClipboardMonitor: ObservableObject {
 
     func toggleFavorite(_ item: ClipboardItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+
+        // 收藏前检查上限（取消收藏不受限）
+        if !items[index].isFavorite {
+            let currentFavorites = items.reduce(0) { $0 + ($1.isFavorite ? 1 : 0) }
+            guard currentFavorites < maxFavorites else {
+                NSLog("Vellum: 收藏已达上限 \(maxFavorites)，忽略本次收藏")
+                NSSound(named: "Funk")?.play()
+                return
+            }
+        }
+
         items[index].isFavorite.toggle()
 
         let fingerprint = items[index].fingerprint
@@ -56,10 +81,17 @@ final class ClipboardMonitor: ObservableObject {
         flushNow()
     }
 
-    /// 立即同步落盘（退出前、删除/收藏/清空时调用，避免丢数据）
+    /// 删除/收藏/清空时调用：取消挂起的防抖保存并立即（异步）落盘
     func flushNow() {
         saveGeneration += 1 // 取消挂起的防抖保存
         store.save(items)
+    }
+
+    /// 退出前调用：落盘并同步等待写盘队列清空，避免丢数据
+    func flushAndWait() {
+        saveGeneration += 1
+        store.save(items)
+        store.flush()
     }
 
     /// 按设置的保留时长清理过期项（收藏豁免）
@@ -93,6 +125,9 @@ final class ClipboardMonitor: ObservableObject {
         case .image:
             if !item.fileURLs.isEmpty {
                 pasteboard.writeObjects(item.fileURLs as [NSURL])
+            } else if let full = store.fullImage(for: item.fingerprint) {
+                // 内存里只留缩略图，粘贴时从磁盘加载原图，保证全分辨率
+                pasteboard.writeObjects([full])
             } else if let image = item.image {
                 pasteboard.writeObjects([image])
             }
@@ -160,8 +195,13 @@ final class ClipboardMonitor: ObservableObject {
         }
 
         if let image = NSImage(pasteboard: pasteboard) {
+            // 用剪贴板原始字节做内容 hash 指纹（更准、避免不同图碰撞），优先复用已有数据不重复转码
+            let rawData = pasteboard.data(forType: .png)
+                ?? pasteboard.data(forType: .tiff)
+                ?? image.tiffRepresentation
             return makeImageItem(
                 image: image,
+                rawData: rawData,
                 sourceName: sourceName,
                 sourceBundleIdentifier: sourceBundleIdentifier,
                 sourceIcon: sourceIcon
@@ -192,13 +232,15 @@ final class ClipboardMonitor: ObservableObject {
 
     private func makeImageItem(
         image: NSImage,
+        rawData: Data?,
         sourceName: String,
         sourceBundleIdentifier: String?,
         sourceIcon: NSImage?
     ) -> ClipboardItem {
         let width = Int(image.size.width)
         let height = Int(image.size.height)
-        let fingerprint = "image:\(width)×\(height):\(image.tiffRepresentation?.count ?? 0)"
+        let hash = rawData?.vellumContentHash ?? "\(width)x\(height)"
+        let fingerprint = "image:\(hash)"
 
         return ClipboardItem(
             kind: .image,
@@ -238,6 +280,8 @@ final class ClipboardMonitor: ObservableObject {
            let preview = NSImage(contentsOf: imageURL) {
             let width = Int(preview.size.width)
             let height = Int(preview.size.height)
+            // 卡片只显示缩略图；粘贴时走原始文件 URL，保真度不受影响
+            let thumbnail = preview.vellumThumbnail()
 
             return ClipboardItem(
                 kind: .image,
@@ -245,13 +289,13 @@ final class ClipboardMonitor: ObservableObject {
                 subtitle: "刚刚",
                 detail: "\(width) × \(height)",
                 rawText: nil,
-                image: preview,
+                image: thumbnail,
                 fileURLs: urls,
                 colorHex: nil,
                 linkURL: nil,
                 previewTitle: first,
                 previewSubtitle: imageURL.deletingLastPathComponent().path,
-                previewImage: preview,
+                previewImage: thumbnail,
                 sourceAppName: sourceName,
                 sourceBundleIdentifier: sourceBundleIdentifier,
                 sourceIcon: sourceIcon,
@@ -301,6 +345,11 @@ final class ClipboardMonitor: ObservableObject {
     ) -> ClipboardItem {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let kind = classify(text: trimmed)
+        // RTF 超过上限则丢弃，降级为纯文本粘贴（避免 base64 撑大 JSON 与内存占用）
+        let boundedRTF: Data? = {
+            guard let richRTFData, richRTFData.count <= maxRTFBytes else { return nil }
+            return richRTFData
+        }()
         let url = kind == .link ? URL(string: trimmed) : nil
         let title = linkTitle(for: url) ?? kind.label
         let detail: String
@@ -332,7 +381,7 @@ final class ClipboardMonitor: ObservableObject {
             sourceIcon: sourceIcon,
             createdAt: Date(),
             fingerprint: "\(kind.rawValue):\(text)",
-            richRTFData: (kind == .text || kind == .code) ? richRTFData : nil
+            richRTFData: (kind == .text || kind == .code) ? boundedRTF : nil
         )
     }
 
@@ -427,7 +476,8 @@ final class ClipboardMonitor: ObservableObject {
                             return
                         }
 
-                        self.items[imageIndex].previewImage = image
+                        // 预览图卡片上只显示 56pt，存缩略图即可
+                        self.items[imageIndex].previewImage = image.vellumThumbnail(maxPixel: 160)
                     }
                 }
             }

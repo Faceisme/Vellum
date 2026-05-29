@@ -178,6 +178,10 @@ final class ClipboardPanelController {
         let hostingView = NSHostingView(rootView: content)
         hostingView.wantsLayer = true
         hostingView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        // 关闭组透明度：弹出动画对整层做 opacity 渐变时，组透明度会把整棵图层树
+        // （玻璃+卡片+阴影，约 1400×330 retina）每帧离屏重合成一次，是入场掉帧的主因。
+        // 关掉后 opacity 按子图层各自应用，不再每帧离屏 flatten。
+        hostingView.layer?.allowsGroupOpacity = false
         panel.contentView = hostingView
         panel.backgroundColor = .clear
         panel.isOpaque = false
