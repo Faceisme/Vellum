@@ -8,7 +8,7 @@ extension Notification.Name {
     static let vellumNavSelect = Notification.Name("vellum.nav.select")
     static let vellumNavEscape = Notification.Name("vellum.nav.escape")
     static let vellumNavScroll = Notification.Name("vellum.nav.scroll")
-    static let vellumNavCancelSearch = Notification.Name("vellum.nav.cancelSearch")
     static let vellumNavStartSearch = Notification.Name("vellum.nav.startSearch")
-    static let vellumNavWarmSearch = Notification.Name("vellum.nav.warmSearch")
+    static let vellumNavCancelSearch = Notification.Name("vellum.nav.cancelSearch")
+    static let vellumPanelResetSearch = Notification.Name("vellum.panel.resetSearch")
 }

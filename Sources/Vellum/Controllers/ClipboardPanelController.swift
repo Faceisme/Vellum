@@ -54,6 +54,7 @@ final class ClipboardPanelController {
 
     func show() {
         guard panelState != .showing, panelState != .visible else { return }
+        NotificationCenter.default.post(name: .vellumPanelResetSearch, object: nil)
 
         // 记录“当前正在用的 App”，必须在激活自己之前抓
         let frontmost = NSWorkspace.shared.frontmostApplication
@@ -97,6 +98,7 @@ final class ClipboardPanelController {
         animationToken += 1
         let token = animationToken
         panelState = .hiding
+        NotificationCenter.default.post(name: .vellumPanelResetSearch, object: nil)
 
         removeEventMonitors()
 
@@ -282,9 +284,6 @@ final class ClipboardPanelController {
                 layer.opacity = 1
                 layer.transform = CATransform3DIdentity
                 self.panelState = panel.isVisible ? .visible : .hidden
-                if panel.isVisible {
-                    NotificationCenter.default.post(name: .vellumNavWarmSearch, object: nil)
-                }
             }
         }
         CATransaction.setDisableActions(true)
@@ -347,21 +346,19 @@ final class ClipboardPanelController {
             guard let self else { return event }
 
             if event.type == .leftMouseDown {
-                if self.isCollapsedSearchHit(event) {
-                    NotificationCenter.default.post(name: .vellumNavStartSearch, object: nil)
-                }
-
-                if !self.isTextInputHit(event) {
-                    NotificationCenter.default.post(
-                        name: .vellumNavCancelSearch,
-                        object: nil,
-                        userInfo: self.panelClickUserInfo(for: event)
-                    )
+                // 只有点击「工具栏以下的卡片列表区」才收起搜索；顶部工具栏（搜索框、清空、
+                // 过滤、收藏、返回等控件）整条都不收起。过滤菜单的点击发生在 popover 窗口里，
+                // event.window 不是本面板，天然被下面的 window 判断排除。
+                if event.window == self.panel, let contentView = self.panel?.contentView {
+                    let toolbarBandHeight: CGFloat = 64
+                    if event.locationInWindow.y < contentView.bounds.height - toolbarBandHeight {
+                        NotificationCenter.default.post(name: .vellumNavCancelSearch, object: nil)
+                    }
                 }
                 return event
             }
 
-            // Cmd+F：唤起并聚焦搜索框（在搜索中再按则保持聚焦）
+            // Cmd+F：唤起并聚焦搜索框；已在搜索中再按则切换「来源 / 类型」过滤菜单
             if event.modifierFlags.contains(.command), event.keyCode == 3 {
                 NotificationCenter.default.post(name: .vellumNavStartSearch, object: nil)
                 return nil
@@ -432,59 +429,6 @@ final class ClipboardPanelController {
         return typeName.contains("FieldEditor") || typeName.contains("Text")
     }
 
-    private func isTextInputHit(_ event: NSEvent) -> Bool {
-        guard
-            let window = event.window,
-            let contentView = window.contentView
-        else {
-            return false
-        }
-
-        let point = contentView.convert(event.locationInWindow, from: nil)
-        var hitView: NSView? = contentView.hitTest(point)
-
-        while let view = hitView {
-            if view is NSTextView || view is NSTextField {
-                return true
-            }
-
-            let typeName = String(describing: type(of: view))
-            if typeName.contains("TextField") || typeName.contains("TextView") || typeName.contains("FieldEditor") {
-                return true
-            }
-
-            hitView = view.superview
-        }
-
-        return false
-    }
-
-    private func panelClickUserInfo(for event: NSEvent) -> [String: CGFloat] {
-        guard let contentView = event.window?.contentView else { return [:] }
-
-        let bounds = contentView.bounds
-        return [
-            "x": event.locationInWindow.x,
-            "y": event.locationInWindow.y,
-            "width": bounds.width,
-            "height": bounds.height
-        ]
-    }
-
-    private func isCollapsedSearchHit(_ event: NSEvent) -> Bool {
-        guard let contentView = event.window?.contentView else { return false }
-
-        let bounds = contentView.bounds
-        let point = event.locationInWindow
-        let toolbarMinY = bounds.maxY - 68
-        let toolbarMaxY = bounds.maxY - 14
-        let searchCenterX = bounds.midX - 92
-        let searchHalfWidth: CGFloat = 30
-
-        return point.y >= toolbarMinY
-            && point.y <= toolbarMaxY
-            && abs(point.x - searchCenterX) <= searchHalfWidth
-    }
 }
 
 final class VellumPanel: NSPanel {

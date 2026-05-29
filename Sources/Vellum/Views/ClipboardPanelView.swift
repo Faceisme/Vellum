@@ -14,18 +14,29 @@ struct ClipboardPanelView: View {
     @State private var searchText = ""
     /// 实际驱动过滤的查询词，相对 searchText 做 150ms 防抖，避免每次按键都重算过滤 + 重建卡片时间线（打字掉帧）
     @State private var debouncedQuery = ""
-    @State private var searchFieldReady = false
-    @State private var didWarmSearchField = false
+    @State private var searchFocusRequest = 0
+    @State private var searchResetRequest = 0
     @State private var showFavoritesOnly = false
     @State private var selectedIndex = 0
     @State private var keyboardScrollRequest = 0
-    @FocusState private var searchFieldFocused: Bool
+    /// 二次过滤：来源 App（按 sourceAppName）与类型（kind），与文本搜索、收藏叠加生效
+    @State private var sourceFilter: String? = nil
+    @State private var kindFilter: ClipboardKind? = nil
+    @State private var showFilterMenu = false
 
     private var filteredItems: [ClipboardItem] {
         var result = monitor.items
 
         if showFavoritesOnly {
             result = result.filter(\.isFavorite)
+        }
+
+        if let kindFilter {
+            result = result.filter { $0.kind == kindFilter }
+        }
+
+        if let sourceFilter {
+            result = result.filter { $0.sourceAppName == sourceFilter }
         }
 
         let query = debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -50,6 +61,30 @@ struct ClipboardPanelView: View {
         return result
     }
 
+    /// 历史里出现过的类型（用于过滤菜单「类型」分区），按枚举固定顺序
+    private var availableKinds: [ClipboardKind] {
+        let present = Set(monitor.items.map(\.kind))
+        return ClipboardKind.allCases.filter { present.contains($0) }
+    }
+
+    /// 历史里出现过的来源 App（去重，按名称排序），用于过滤菜单「应用」分区
+    private var availableSources: [ClipboardSourceOption] {
+        var seen = Set<String>()
+        var result: [ClipboardSourceOption] = []
+        for item in monitor.items {
+            let name = item.sourceAppName
+            guard !name.isEmpty, seen.insert(name).inserted else { continue }
+            result.append(
+                ClipboardSourceOption(
+                    name: name,
+                    bundleID: item.sourceBundleIdentifier,
+                    icon: item.sourceIcon
+                )
+            )
+        }
+        return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
     /// 选中下标钳制在有效范围内（按给定数量，避免重复计算 filteredItems）
     private func clampedSelection(count: Int) -> Int {
         guard count > 0 else { return 0 }
@@ -57,9 +92,6 @@ struct ClipboardPanelView: View {
     }
 
     private var panelCornerRadius: CGFloat { 30 }
-    private var searchAnimation: Animation {
-        .smooth(duration: 0.30, extraBounce: 0)
-    }
 
     private struct TimelineContentSignature: Equatable {
         let items: [TimelineItemSignature]
@@ -129,13 +161,14 @@ struct ClipboardPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: .vellumNavStartSearch)) { _ in
             expandSearch()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .vellumNavCancelSearch)) { notification in
-            if isSearching && !isSearchFieldClick(notification) {
+        .onReceive(NotificationCenter.default.publisher(for: .vellumNavCancelSearch)) { _ in
+            // 点击下方卡片区即收起；过滤菜单开着时先让它消化这次点击（关闭弹层），不收起搜索
+            if isSearching && !showFilterMenu {
                 collapseSearch()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .vellumNavWarmSearch)) { _ in
-            warmSearchField()
+        .onReceive(NotificationCenter.default.publisher(for: .vellumPanelResetSearch)) { _ in
+            resetSearchState()
         }
         .task(id: searchText) {
             // 清空立即生效；输入时等 150ms 再过滤，打字过程不触发卡片重建
@@ -178,60 +211,24 @@ struct ClipboardPanelView: View {
     }
 
     private func expandSearch() {
+        // 第一次 Cmd+F：展开并聚焦搜索框；已在搜索中再按：切换「来源 / 类型」过滤菜单
         guard !isSearching else {
-            searchFieldFocused = true
+            showFilterMenu.toggle()
             return
         }
 
-        searchFieldFocused = false
-        withAnimation(searchAnimation) {
-            isSearching = true
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) {
-            guard isSearching else { return }
-            searchFieldReady = true
-            DispatchQueue.main.async {
-                searchFieldFocused = true
-            }
-        }
+        isSearching = true
+        searchFocusRequest += 1
     }
 
-    private func warmSearchField() {
-        guard !didWarmSearchField, !isSearching else { return }
-        didWarmSearchField = true
-        searchFieldFocused = true
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-            if !isSearching {
-                searchFieldFocused = false
-            }
-        }
-    }
-
-    private func isSearchFieldClick(_ notification: Notification) -> Bool {
-        guard
-            let userInfo = notification.userInfo,
-            let x = userInfo["x"] as? CGFloat,
-            let y = userInfo["y"] as? CGFloat,
-            let width = userInfo["width"] as? CGFloat,
-            let height = userInfo["height"] as? CGFloat
-        else {
-            return false
-        }
-
-        let searchWidth: CGFloat = 392
-        let trailingControlsWidth: CGFloat = 132
-        let clusterWidth = searchWidth + trailingControlsWidth
-        let searchMinX = width / 2 - clusterWidth / 2 - 10
-        let searchMaxX = searchMinX + searchWidth + 20
-        let searchMinY = height - 68
-        let searchMaxY = height - 12
-
-        return x >= searchMinX
-            && x <= searchMaxX
-            && y >= searchMinY
-            && y <= searchMaxY
+    private func resetSearchState() {
+        isSearching = false
+        searchText = ""
+        debouncedQuery = ""
+        showFilterMenu = false
+        sourceFilter = nil
+        kindFilter = nil
+        searchResetRequest += 1
     }
 
     private var toolbar: some View {
@@ -251,210 +248,43 @@ struct ClipboardPanelView: View {
         .frame(height: 44)
     }
 
-    private var clipboardChip: some View {
-        ToolbarChipButton(
-            title: "剪贴板",
-            symbolName: "clock.arrow.circlepath",
-            dotColor: nil,
-            isSelected: !showFavoritesOnly
-        ) {
-            withAnimation(.smooth(duration: 0.2)) { showFavoritesOnly = false }
-            selectedIndex = 0
-        }
-    }
-
-    private var clipboardModeButton: some View {
-        Button {
-            if isSearching {
-                collapseSearch()
-            } else {
-                withAnimation(.smooth(duration: 0.2)) { showFavoritesOnly = false }
-                selectedIndex = 0
-            }
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: isSearching ? 16 : 13, weight: isSearching ? .regular : .semibold))
-                    .frame(width: isSearching ? 34 : 15, height: 30)
-
-                Text("剪贴板")
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .opacity(isSearching ? 0 : 1)
-                    .frame(width: isSearching ? 0 : 42, alignment: .leading)
-                    .clipped()
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, isSearching ? 0 : 12)
-            .frame(width: isSearching ? 34 : 92, height: 30, alignment: .leading)
-            .background(
-                Color(nsColor: .controlColor).opacity(isSearching ? 0 : (!showFavoritesOnly ? 0.66 : 0.18)),
-                in: Capsule()
-            )
-            .overlay {
-                Capsule()
-                    .stroke(.white.opacity(isSearching ? 0 : (!showFavoritesOnly ? 0.28 : 0)), lineWidth: 0.7)
-            }
-        }
-        .buttonStyle(VellumPressButtonStyle(pressedScale: 0.94, pressedOpacity: 0.86))
-        .help(isSearching ? "返回剪贴板" : "剪贴板")
-    }
-
     private var toolbarCluster: some View {
-        let expandedWidth: CGFloat = 522
-        let collapsedWidth: CGFloat = 222
-        let collapsedStart = (expandedWidth - collapsedWidth) / 2
-        let favoriteWidth: CGFloat = 76
-
-        return ZStack(alignment: .leading) {
-            searchControl
-                .offset(x: isSearching ? 0 : collapsedStart)
-
-            clipboardModeButton
-                .offset(x: isSearching ? 402 : collapsedStart + 44)
-
-            favoritesChip
-                .frame(width: favoriteWidth, height: 34)
-                .offset(x: isSearching ? 446 : collapsedStart + 146)
-        }
-        .frame(width: expandedWidth, height: 44, alignment: .leading)
-        .clipped()
-    }
-
-    private var favoritesChip: some View {
-        ToolbarChipButton(
-            title: "收藏",
-            symbolName: "star.fill",
-            dotColor: nil,
-            isSelected: showFavoritesOnly
-        ) {
-            withAnimation(.smooth(duration: 0.2)) { showFavoritesOnly = true }
-            selectedIndex = 0
-        }
+        SearchToolbarClusterView(
+            isSearching: $isSearching,
+            searchText: $searchText,
+            showFavoritesOnly: $showFavoritesOnly,
+            focusRequest: $searchFocusRequest,
+            resetRequest: $searchResetRequest,
+            showFilterMenu: $showFilterMenu,
+            sourceFilter: $sourceFilter,
+            kindFilter: $kindFilter,
+            availableKinds: availableKinds,
+            availableSources: availableSources,
+            onClipboardSelected: {
+                selectedIndex = 0
+            },
+            onFavoritesSelected: {
+                selectedIndex = 0
+            },
+            onSearchCancelled: {
+                collapseSearch()
+            }
+        )
+        .frame(width: 522, height: 44)
     }
 
     private func collapseSearch() {
         guard isSearching else { return }
-        searchFieldReady = false
-        searchFieldFocused = false
-        withAnimation(searchAnimation) {
-            isSearching = false
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.40) {
+        isSearching = false
+        showFilterMenu = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.38) {
             if !isSearching {
                 searchText = ""
                 debouncedQuery = ""
+                sourceFilter = nil
+                kindFilter = nil
             }
         }
-    }
-
-    private var searchControl: some View {
-        ZStack(alignment: .leading) {
-            collapsedSearchButton
-                .opacity(isSearching ? 0 : 1)
-                .allowsHitTesting(!isSearching)
-
-            expandedSearchField
-                .opacity(isSearching ? 1 : 0)
-                .scaleEffect(x: isSearching ? 1 : 0.08, y: isSearching ? 1 : 0.82, anchor: .leading)
-                .allowsHitTesting(isSearching)
-        }
-        .frame(width: 392, height: 34, alignment: .leading)
-    }
-
-    private var collapsedSearchButton: some View {
-        Button {
-            expandSearch()
-        } label: {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .semibold))
-                .frame(width: 34, height: 34)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Color(nsColor: .labelColor).opacity(0.92))
-        .help("搜索")
-    }
-
-    private var expandedSearchField: some View {
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlColor).opacity(0.72))
-
-            searchFieldContent
-                .padding(.horizontal, 9)
-        }
-        .frame(width: 392, height: 28, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            // 用 strokeBorder（描边画在形状内侧）而非 stroke（描边跨越边缘）；
-            // 否则聚焦蓝环的外半部分会被父容器 toolbarCluster 的 .clipped() 在左边缘切掉
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(
-                    searchFieldFocused ? Color.blue.opacity(0.78) : .white.opacity(0.26),
-                    lineWidth: searchFieldFocused ? 1.6 : 0.8
-                )
-        }
-        .shadow(color: .black.opacity(0.06), radius: 6, x: 0, y: 2)
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .onTapGesture {
-            guard searchFieldReady else { return }
-            searchFieldFocused = true
-        }
-    }
-
-    private var searchFieldContent: some View {
-        HStack(spacing: 7) {
-            Button {
-                expandSearch()
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .frame(width: 14, height: 20)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-
-            ZStack(alignment: .leading) {
-                if !searchFieldReady {
-                    Text("搜索")
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(.secondary.opacity(0.48))
-                }
-
-                TextField(
-                    "",
-                    text: $searchText,
-                    prompt: Text("搜索")
-                        .foregroundStyle(.secondary.opacity(0.48))
-                )
-                .textFieldStyle(.plain)
-                .focused($searchFieldFocused)
-                .font(.system(size: 12.5, weight: .medium))
-                .opacity(searchFieldReady ? 1 : 0)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .allowsHitTesting(searchFieldReady)
-
-            Button {
-                searchText = ""
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 14, height: 18)
-            }
-            .buttonStyle(VellumPressButtonStyle(pressedScale: 0.88, pressedOpacity: 0.78))
-            .foregroundStyle(.secondary)
-            .opacity(searchFieldReady && !searchText.isEmpty ? 1 : 0)
-            .allowsHitTesting(searchFieldReady && !searchText.isEmpty)
-
-            // Decorative filter glyph (筛选占位，返回剪贴板请用右侧时钟按钮)
-            Image(systemName: "line.3.horizontal.decrease")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.secondary.opacity(0.7))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .clipped()
     }
 
     private var moreMenu: some View {
@@ -549,18 +379,6 @@ struct ClipboardPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 15, weight: .semibold))
-                .frame(width: 30, height: 30)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-        .help(help)
-    }
-
     private func toolbarPlainIcon(
         _ symbol: String,
         size: CGFloat,
@@ -568,20 +386,6 @@ struct ClipboardPanelView: View {
         action: @escaping () -> Void
     ) -> some View {
         ToolbarIconButton(symbol: symbol, size: size, help: help, action: action)
-    }
-
-    private func toolbarChip<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 8) {
-            content()
-        }
-        .foregroundStyle(.primary)
-        .padding(.horizontal, 15)
-        .frame(height: 34)
-        .background(Color(nsColor: .controlColor).opacity(0.58), in: Capsule())
-        .overlay {
-            Capsule()
-                .stroke(.white.opacity(0.26), lineWidth: 0.7)
-        }
     }
 }
 
@@ -610,80 +414,5 @@ private struct ToolbarIconButton: View {
 
     private var iconBackground: Color {
         Color(nsColor: .controlColor).opacity(isHovered ? 0.42 : 0)
-    }
-}
-
-private struct ToolbarChipButton: View {
-    let title: String
-    let symbolName: String?
-    let dotColor: Color?
-    let isSelected: Bool
-    let action: () -> Void
-
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                if let symbolName {
-                    Image(systemName: symbolName)
-                        .font(.system(size: 13, weight: .semibold))
-                }
-
-                if let dotColor {
-                    Circle()
-                        .fill(dotColor)
-                        .frame(width: 10, height: 10)
-                }
-
-                Text(title)
-                    .font(.system(size: 13, weight: symbolName == nil ? .medium : .semibold))
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .background(chipBackground, in: Capsule())
-            .overlay {
-                Capsule()
-                    .stroke(.white.opacity(isSelected || isHovered ? 0.28 : 0), lineWidth: 0.7)
-            }
-        }
-        .buttonStyle(VellumPressButtonStyle(pressedScale: 0.94, pressedOpacity: 0.86))
-        .onHover { isHovered = $0 }
-        .animation(.spring(response: 0.18, dampingFraction: 0.82), value: isHovered)
-        .animation(.spring(response: 0.20, dampingFraction: 0.82), value: isSelected)
-    }
-
-    private var chipBackground: Color {
-        let opacity: Double
-        if isSelected {
-            opacity = 0.66
-        } else if isHovered {
-            opacity = 0.38
-        } else {
-            opacity = 0.18
-        }
-
-        return Color(nsColor: .controlColor).opacity(opacity)
-    }
-}
-
-// MARK: - 搜索框横向拉伸展开过渡（对齐 Paste：从左侧拉伸长出 + 淡入）
-
-private struct HorizontalStretch: ViewModifier {
-    var scaleX: CGFloat
-
-    func body(content: Content) -> some View {
-        content.scaleEffect(x: scaleX, y: 1, anchor: .leading)
-    }
-}
-
-extension AnyTransition {
-    static var searchExpand: AnyTransition {
-        .modifier(
-            active: HorizontalStretch(scaleX: 0.16),
-            identity: HorizontalStretch(scaleX: 1)
-        )
-        .combined(with: .opacity)
     }
 }
