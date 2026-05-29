@@ -10,4 +10,5 @@ extension Notification.Name {
     static let vellumNavScroll = Notification.Name("vellum.nav.scroll")
     static let vellumNavCancelSearch = Notification.Name("vellum.nav.cancelSearch")
     static let vellumNavStartSearch = Notification.Name("vellum.nav.startSearch")
+    static let vellumNavWarmSearch = Notification.Name("vellum.nav.warmSearch")
 }

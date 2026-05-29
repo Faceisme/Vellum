@@ -24,6 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bindSettings()
         applyStatusItemVisibility()
         clipboardMonitor.start()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.panelController.prepare()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

@@ -12,6 +12,8 @@ struct ClipboardPanelView: View {
 
     @State private var isSearching = false
     @State private var searchText = ""
+    @State private var searchFieldReady = false
+    @State private var didWarmSearchField = false
     @State private var showFavoritesOnly = false
     @State private var selectedIndex = 0
     @State private var keyboardScrollRequest = 0
@@ -55,7 +57,7 @@ struct ClipboardPanelView: View {
 
     private var panelCornerRadius: CGFloat { 30 }
     private var searchAnimation: Animation {
-        .spring(response: 0.50, dampingFraction: 0.90, blendDuration: 0.08)
+        .smooth(duration: 0.30, extraBounce: 0)
     }
 
     var body: some View {
@@ -79,7 +81,7 @@ struct ClipboardPanelView: View {
                         lineWidth: 1
                     )
             }
-            // 阴影交给 NSWindow 系统阴影（hasShadow=true），不在 SwiftUI 自绘
+            .shadow(color: .black.opacity(0.22), radius: 26, x: 0, y: 11)
 
             VStack(spacing: 0) {
                 toolbar
@@ -111,6 +113,9 @@ struct ClipboardPanelView: View {
             if isSearching && !isSearchFieldClick(notification) {
                 collapseSearch()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .vellumNavWarmSearch)) { _ in
+            warmSearchField()
         }
     }
 
@@ -150,9 +155,23 @@ struct ClipboardPanelView: View {
             isSearching = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if isSearching {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            guard isSearching else { return }
+            searchFieldReady = true
+            DispatchQueue.main.async {
                 searchFieldFocused = true
+            }
+        }
+    }
+
+    private func warmSearchField() {
+        guard !didWarmSearchField, !isSearching else { return }
+        didWarmSearchField = true
+        searchFieldFocused = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            if !isSearching {
+                searchFieldFocused = false
             }
         }
     }
@@ -190,12 +209,7 @@ struct ClipboardPanelView: View {
 
             Spacer(minLength: 20)
 
-            HStack(spacing: 10) {
-                searchControl
-                clipboardModeButton
-                favoritesChip
-            }
-            .animation(searchAnimation, value: isSearching)
+            toolbarCluster
 
             Spacer(minLength: 20)
 
@@ -253,6 +267,27 @@ struct ClipboardPanelView: View {
         .help(isSearching ? "返回剪贴板" : "剪贴板")
     }
 
+    private var toolbarCluster: some View {
+        let expandedWidth: CGFloat = 522
+        let collapsedWidth: CGFloat = 222
+        let collapsedStart = (expandedWidth - collapsedWidth) / 2
+        let favoriteWidth: CGFloat = 76
+
+        return ZStack(alignment: .leading) {
+            searchControl
+                .offset(x: isSearching ? 0 : collapsedStart)
+
+            clipboardModeButton
+                .offset(x: isSearching ? 402 : collapsedStart + 44)
+
+            favoritesChip
+                .frame(width: favoriteWidth, height: 34)
+                .offset(x: isSearching ? 446 : collapsedStart + 146)
+        }
+        .frame(width: expandedWidth, height: 44, alignment: .leading)
+        .clipped()
+    }
+
     private var favoritesChip: some View {
         ToolbarChipButton(
             title: "收藏",
@@ -267,6 +302,7 @@ struct ClipboardPanelView: View {
 
     private func collapseSearch() {
         guard isSearching else { return }
+        searchFieldReady = false
         searchFieldFocused = false
         withAnimation(searchAnimation) {
             isSearching = false
@@ -281,7 +317,7 @@ struct ClipboardPanelView: View {
     private var searchControl: some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous)
-                .fill(.regularMaterial)
+                .fill(Color(nsColor: .controlColor).opacity(0.72))
                 .opacity(isSearching ? 1 : 0)
 
             searchFieldContent
@@ -299,12 +335,10 @@ struct ClipboardPanelView: View {
                 )
         }
         .shadow(color: .black.opacity(isSearching ? 0.06 : 0), radius: 6, x: 0, y: 2)
-        .glassEffect(.regular.tint(.white.opacity(isSearching ? 0.12 : 0)), in: RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous))
         .onTapGesture {
             expandSearch()
         }
-        .animation(searchAnimation, value: isSearching)
     }
 
     private var searchFieldContent: some View {
@@ -316,20 +350,29 @@ struct ClipboardPanelView: View {
                     .font(.system(size: isSearching ? 12.5 : 16, weight: .semibold))
                     .frame(width: isSearching ? 14 : 34, height: isSearching ? 20 : 34)
             }
-            .buttonStyle(VellumPressButtonStyle(pressedScale: 0.90, pressedOpacity: 0.82))
+            .buttonStyle(.plain)
             .foregroundStyle(isSearching ? .secondary : Color(nsColor: .labelColor).opacity(0.92))
 
-            TextField(
-                "",
-                text: $searchText,
-                prompt: Text("搜索")
-                    .foregroundStyle(.secondary.opacity(0.48))
-            )
+            ZStack(alignment: .leading) {
+                if isSearching && !searchFieldReady {
+                    Text("搜索")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.48))
+                }
+
+                TextField(
+                    "",
+                    text: $searchText,
+                    prompt: Text("搜索")
+                        .foregroundStyle(.secondary.opacity(0.48))
+                )
                 .textFieldStyle(.plain)
                 .focused($searchFieldFocused)
                 .font(.system(size: 12.5, weight: .medium))
-                .opacity(isSearching ? 1 : 0)
-                .allowsHitTesting(isSearching)
+                .opacity(searchFieldReady ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .allowsHitTesting(searchFieldReady)
 
             Button {
                 searchText = ""
@@ -340,8 +383,8 @@ struct ClipboardPanelView: View {
             }
             .buttonStyle(VellumPressButtonStyle(pressedScale: 0.88, pressedOpacity: 0.78))
             .foregroundStyle(.secondary)
-            .opacity(searchText.isEmpty ? 0 : 1)
-            .allowsHitTesting(!searchText.isEmpty)
+            .opacity(searchFieldReady && !searchText.isEmpty ? 1 : 0)
+            .allowsHitTesting(searchFieldReady && !searchText.isEmpty)
 
             // Decorative filter glyph (筛选占位，返回剪贴板请用右侧时钟按钮)
             Image(systemName: "line.3.horizontal.decrease")
