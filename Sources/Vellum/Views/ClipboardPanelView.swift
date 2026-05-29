@@ -66,12 +66,13 @@ struct ClipboardPanelView: View {
         let items = filteredItems
         let selection = clampedSelection(count: items.count)
         return ZStack {
-            // macOS 26 Liquid Glass — 保留通透感，同时提高底板不透明度。
-            // 阴影改用原生 .shadow()（GPU 优化），不再用全屏 .blur 矩形（入场每帧重算高斯模糊会卡）。
+            // macOS 26 Liquid Glass — 用 .regular（磨砂）而非 .clear（高透）：后者要大量采样/折射
+            // 背景，合成最贵；.regular 更实、合成更轻（对齐 Paste 的磨砂观感，降 WindowServer 负载）。
+            // 底色也调实一些，进一步减少需要实时合成的背景面积。
             GlassEffectView(
                 cornerRadius: panelCornerRadius,
-                tintColor: NSColor.windowBackgroundColor.withAlphaComponent(0.66),
-                style: .clear
+                tintColor: NSColor.windowBackgroundColor.withAlphaComponent(0.76),
+                style: .regular
             )
             .clipShape(RoundedRectangle(cornerRadius: panelCornerRadius, style: .continuous))
             .overlay {

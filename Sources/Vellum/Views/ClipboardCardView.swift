@@ -29,8 +29,10 @@ struct ClipboardCardView: View {
             .frame(width: cardWidth, height: cardHeight)
             .clipped()
             .background {
+                // 卡片背景用完全不透明色：滚动时被卡片遮住的玻璃区域可被遮挡剔除，
+                // 不必每帧重新合成（之前 0.94 半透明会让玻璃透出来、强制每帧重画那块）。
                 RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.94))
+                    .fill(Color(nsColor: .textBackgroundColor))
             }
             .clipShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
             .overlay {
