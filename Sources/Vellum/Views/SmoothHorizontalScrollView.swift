@@ -52,6 +52,10 @@ struct SmoothHorizontalScrollView<Content: View, ContentSignature: Equatable>: N
         scrollView.scrollerStyle = .overlay
         scrollView.allowsMagnification = false
         scrollView.verticalScrollElasticity = .none
+        // 两个方向都不交给系统做弹性/越界转发；横向滚动完全由下面的 scrollWheel 自己消化，
+        // 避免触摸板横向滑动被系统识别成「从右边缘划入通知中心 / 前进后退翻页」等手势。
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.usesPredominantAxisScrolling = true
 
         // 整条滚动链路都用图层支撑：滚动时只平移已缓存的图层位图，
         // 而不是每帧重画 SwiftUI 内容（自定义 scrollWheel 已绕过系统的 responsive scrolling，
@@ -144,18 +148,19 @@ final class VellumSmoothScrollView: NSScrollView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard let documentView else {
-            super.scrollWheel(with: event)
-            return
-        }
+        // 横向时间线自己消化所有滚动事件，绝不调用 super、绝不向上层/系统转发：
+        // 否则触摸板横向滑动（尤其滚到边界后的越界 / 抬手后的动量阶段）会被系统当成
+        // 「从右边缘划入通知中心」或前进后退翻页的手势。无论能否滚动，都把事件吞掉。
+        guard let documentView else { return }
 
         let maxX = max(0, documentView.frame.width - contentView.bounds.width)
-        guard maxX > 0 else { return }
 
         let deltaX = event.scrollingDeltaX
         let deltaY = event.scrollingDeltaY
         let delta = abs(deltaX) >= abs(deltaY) ? deltaX : deltaY
-        guard delta != 0 else { return }
+
+        // 没有可滚动空间、或没有有效位移：直接吞掉，不做任何转发。
+        guard maxX > 0, delta != 0 else { return }
 
         if event.hasPreciseScrollingDeltas {
             // 触摸板：直接跟手（系统本身已平滑）
