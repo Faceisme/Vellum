@@ -61,6 +61,20 @@ struct ClipboardPanelView: View {
         .smooth(duration: 0.30, extraBounce: 0)
     }
 
+    private struct TimelineContentSignature: Equatable {
+        let items: [TimelineItemSignature]
+        let selectedIndex: Int
+        let query: String
+    }
+
+    private struct TimelineItemSignature: Equatable {
+        let id: UUID
+        let isFavorite: Bool
+        let previewTitle: String?
+        let previewSubtitle: String?
+        let previewImageID: ObjectIdentifier?
+    }
+
     var body: some View {
         // 一次 body 只算一次过滤结果与选中下标，避免在 clampedSelection/timeline/每张卡片里重复全量 filter
         let items = filteredItems
@@ -169,11 +183,12 @@ struct ClipboardPanelView: View {
             return
         }
 
+        searchFieldFocused = false
         withAnimation(searchAnimation) {
             isSearching = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) {
             guard isSearching else { return }
             searchFieldReady = true
             DispatchQueue.main.async {
@@ -335,30 +350,56 @@ struct ClipboardPanelView: View {
 
     private var searchControl: some View {
         ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous)
-                .fill(Color(nsColor: .controlColor).opacity(0.72))
+            collapsedSearchButton
+                .opacity(isSearching ? 0 : 1)
+                .allowsHitTesting(!isSearching)
+
+            expandedSearchField
                 .opacity(isSearching ? 1 : 0)
+                .scaleEffect(x: isSearching ? 1 : 0.08, y: isSearching ? 1 : 0.82, anchor: .leading)
+                .allowsHitTesting(isSearching)
+        }
+        .frame(width: 392, height: 34, alignment: .leading)
+    }
+
+    private var collapsedSearchButton: some View {
+        Button {
+            expandSearch()
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 34, height: 34)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color(nsColor: .labelColor).opacity(0.92))
+        .help("搜索")
+    }
+
+    private var expandedSearchField: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlColor).opacity(0.72))
 
             searchFieldContent
-                .padding(.horizontal, isSearching ? 9 : 0)
+                .padding(.horizontal, 9)
         }
-        .frame(width: isSearching ? 392 : 34, height: isSearching ? 28 : 34, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous))
+        .frame(width: 392, height: 28, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             // 用 strokeBorder（描边画在形状内侧）而非 stroke（描边跨越边缘）；
             // 否则聚焦蓝环的外半部分会被父容器 toolbarCluster 的 .clipped() 在左边缘切掉
-            RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(
-                    isSearching
-                    ? (searchFieldFocused ? Color.blue.opacity(0.78) : .white.opacity(0.26))
-                    : .clear,
+                    searchFieldFocused ? Color.blue.opacity(0.78) : .white.opacity(0.26),
                     lineWidth: searchFieldFocused ? 1.6 : 0.8
                 )
         }
-        .shadow(color: .black.opacity(isSearching ? 0.06 : 0), radius: 6, x: 0, y: 2)
-        .contentShape(RoundedRectangle(cornerRadius: isSearching ? 14 : 17, style: .continuous))
+        .shadow(color: .black.opacity(0.06), radius: 6, x: 0, y: 2)
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onTapGesture {
-            expandSearch()
+            guard searchFieldReady else { return }
+            searchFieldFocused = true
         }
     }
 
@@ -368,14 +409,14 @@ struct ClipboardPanelView: View {
                 expandSearch()
             } label: {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: isSearching ? 12.5 : 16, weight: .semibold))
-                    .frame(width: isSearching ? 14 : 34, height: isSearching ? 20 : 34)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .frame(width: 14, height: 20)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(isSearching ? .secondary : Color(nsColor: .labelColor).opacity(0.92))
+            .foregroundStyle(.secondary)
 
             ZStack(alignment: .leading) {
-                if isSearching && !searchFieldReady {
+                if !searchFieldReady {
                     Text("搜索")
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(.secondary.opacity(0.48))
@@ -411,7 +452,6 @@ struct ClipboardPanelView: View {
             Image(systemName: "line.3.horizontal.decrease")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.secondary.opacity(0.7))
-                .opacity(isSearching ? 1 : 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipped()
@@ -438,6 +478,7 @@ struct ClipboardPanelView: View {
         SmoothHorizontalScrollView(
             selectedIndex: selection,
             scrollRequest: keyboardScrollRequest,
+            contentSignature: timelineSignature(items: items, selection: selection, query: query),
             itemCount: items.count,
             itemWidth: 232,
             spacing: 18
@@ -468,6 +509,26 @@ struct ClipboardPanelView: View {
             .padding(.top, 2)
             .padding(.bottom, 16)
         }
+    }
+
+    private func timelineSignature(
+        items: [ClipboardItem],
+        selection: Int,
+        query: String
+    ) -> TimelineContentSignature {
+        TimelineContentSignature(
+            items: items.map {
+                TimelineItemSignature(
+                    id: $0.id,
+                    isFavorite: $0.isFavorite,
+                    previewTitle: $0.previewTitle,
+                    previewSubtitle: $0.previewSubtitle,
+                    previewImageID: $0.previewImage.map(ObjectIdentifier.init)
+                )
+            },
+            selectedIndex: selection,
+            query: query
+        )
     }
 
     private func emptyState(title: String) -> some View {

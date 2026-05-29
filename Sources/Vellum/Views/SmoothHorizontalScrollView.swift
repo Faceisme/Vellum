@@ -2,31 +2,34 @@ import AppKit
 import SwiftUI
 
 /// 横向滚动容器：鼠标滚轮（纵向）也能横向滚动 + 平滑动画 + 键盘定位。
-struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
+struct SmoothHorizontalScrollView<Content: View, ContentSignature: Equatable>: NSViewRepresentable {
     /// HStack 两侧的水平 padding（与 ClipboardPanelView.timeline 里保持一致）
     private static var horizontalPadding: CGFloat { 26 }
 
     let selectedIndex: Int
     let scrollRequest: Int
+    let contentSignature: ContentSignature
     let itemCount: Int
     let itemWidth: CGFloat
     let spacing: CGFloat
-    let content: Content
+    let content: () -> Content
 
     init(
         selectedIndex: Int,
         scrollRequest: Int,
+        contentSignature: ContentSignature,
         itemCount: Int,
         itemWidth: CGFloat,
         spacing: CGFloat,
-        @ViewBuilder content: () -> Content
+        @ViewBuilder content: @escaping () -> Content
     ) {
         self.selectedIndex = selectedIndex
         self.scrollRequest = scrollRequest
+        self.contentSignature = contentSignature
         self.itemCount = itemCount
         self.itemWidth = itemWidth
         self.spacing = spacing
-        self.content = content()
+        self.content = content
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -56,25 +59,29 @@ struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
         scrollView.wantsLayer = true
         scrollView.contentView.wantsLayer = true
 
-        let hostingView = NSHostingView(rootView: content)
+        let hostingView = NSHostingView(rootView: content())
         hostingView.wantsLayer = true
         hostingView.layerContentsRedrawPolicy = .onSetNeedsDisplay
         scrollView.documentView = hostingView
         scrollView.contentWidth = contentWidth()
         context.coordinator.hostingView = hostingView
-        context.coordinator.lastItemCount = itemCount
+        context.coordinator.lastContentSignature = contentSignature
         return scrollView
     }
 
     func updateNSView(_ scrollView: VellumSmoothScrollView, context: Context) {
         guard let hostingView = context.coordinator.hostingView else { return }
 
-        // rootView 必须重新赋值（卡片选中态/内容会变）；尺寸不在这里直接算，
-        // 改由 scrollView.layout() 统一处理——避免 updateNSView 在 clip view 尚无有效高度时
-        // （如时间线被空搜索结果换出后又换回）把内容定成错误尺寸且无法自愈，导致错位。
-        hostingView.rootView = content
-        scrollView.contentWidth = contentWidth() // 内容宽变化 -> 触发重新 layout
-        context.coordinator.lastItemCount = itemCount
+        // 卡片内容没有变化时，不重设 rootView，避免无关工具栏动画每帧重建整条时间线。
+        if context.coordinator.lastContentSignature.map({ $0 != contentSignature }) ?? true {
+            hostingView.rootView = content()
+            context.coordinator.lastContentSignature = contentSignature
+        }
+
+        let width = contentWidth()
+        if scrollView.contentWidth != width {
+            scrollView.contentWidth = width // 内容宽变化 -> 触发重新 layout
+        }
 
         if context.coordinator.lastScrollRequest != scrollRequest {
             context.coordinator.lastScrollRequest = scrollRequest
@@ -89,8 +96,8 @@ struct SmoothHorizontalScrollView<Content: View>: NSViewRepresentable {
 
     final class Coordinator {
         var hostingView: NSHostingView<Content>?
+        var lastContentSignature: ContentSignature?
         var lastScrollRequest = 0
-        var lastItemCount = 0
     }
 }
 
@@ -100,7 +107,10 @@ final class VellumSmoothScrollView: NSScrollView {
 
     /// 内容总宽（按卡片数量算），由 representable 设置；变化时重新布局
     var contentWidth: CGFloat = 0 {
-        didSet { needsLayout = true }
+        didSet {
+            guard contentWidth != oldValue else { return }
+            needsLayout = true
+        }
     }
 
     override func layout() {
